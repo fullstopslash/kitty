@@ -1,0 +1,50 @@
+---
+config:
+  show-name: false
+  use-process-name: false
+  activity-pulse: true
+  pulse-interval-ms: 120
+  pulse-duration-ms: 800
+  fallback-icon: "" # show when no definition is found
+  # fallback-icon: " 󱓇 󱓈  󰚌 󰭿 󰙴 󰆴 󰼁 󰧻 󰍡 󰒓 󰣖 󰙀 󰯆 󰯈 󱄲 󰯇 󱓈 󱄳 " # show when no definition is found
+  show-name: false # show the window name with the icon (defaults to false)
+  icon-position: "left" # show the icon to the "left" or "right" of the window name (defaults to left)
+  # multi-pane-icon: "󰎃" #  show when window has multiple panes (blank by default)
+  # WARNING: If suddenly your window names start showing up with quotes, you need to install go-yq
+#
+# ring-color-active: "#000000"
+# ring-color-inactive: "#aaaaaa"
+
+layout-glyps:
+  tall: ""
+  stack: ""
+
+icons:
+  zsh: "" # zsh-alts: 󱆃󱆃       󰁦          
+  ranger: "󰷏" #  overwrite with your own symbol (Nerd Font icon, emoji, whatever!)
+  lf: "󰷏"
+  yazi: "󰷏"
+  crawl: "󰞇"
+  cataclysm: ""
+  nvim: "" # nvim-alts: "󰴓    󰴓"
+  ncmpcpp: "󰎈"
+  rmcp: "󰎈"
+  newsboat: ""
+  man: "󱚊"
+  info: "󱚊"
+  taskwarrior-tui: ""
+  ikhal: "󰃭"
+  weechat: "󰍡"
+  make: ""
+  ssh: ""
+  tmatrix: "󰘨"
+  cmatrix: "󰘨"
+  tmux : "󰽙"
+  flatpak: "󰏖"
+  pipx: "󰏖"
+  pipxu: "󰏖"
+  z4h: "󰏖"
+  update: "󰏖"
+  null: "󰅏"
+
+  #  󰋙 󰫃 󰫄 󰫅 󰫆 󰫇 󰫈  

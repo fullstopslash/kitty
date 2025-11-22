@@ -1,0 +1,18 @@
+config:
+  prefer-host-icon: true
+
+hosts:
+  waterbug: ""
+  "malphas*":
+    icon: ""
+    ring-color: "#04a5e5"
+    icon-color: "#8839ef"
+    alert-color: "#aa0000"
+  "hecate*":
+    icon: ""
+    ring-color: "#04a5e5"
+    icon-color: "#8839ef"
+    alert-color: "#aa0000"
+  minimedia: ""
+  "*.prod.example.com": "󰣇"
+  "10.*.*.*": "󰟀"

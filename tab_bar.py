@@ -1,20 +1,51 @@
-import datetime
 import os
 import re
+import sys
 import fnmatch
 from typing import Dict
-from kitty.fast_data_types import Screen, get_boss, get_options, add_timer
+from kitty.fast_data_types import Screen, get_boss, get_options
 from kitty.rgb import Color
 from kitty.tab_bar import (
     DrawData,
     ExtraData,
     TabBarData,
     as_rgb,
-    draw_tab_with_powerline,
-    powerline_symbols,
     draw_title,
 )
 from kitty.utils import color_as_int
+
+
+def _log_warning(msg: str) -> None:
+    """Log a warning message to stderr."""
+    print(f"[tab_bar.py] Warning: {msg}", file=sys.stderr)
+
+
+def _strip_yaml_value(val: str) -> str:
+    """Strip inline comments and surrounding quotes from a YAML value."""
+    val = val.strip()
+    if " #" in val:
+        val = val.split(" #", 1)[0].strip()
+    if val and len(val) >= 2 and val[0] in ('"', "'") and val[-1] == val[0]:
+        val = val[1:-1]
+    return val
+
+
+def _normalize_color_key(key: str) -> str:
+    """Normalize color key names (index-color -> ring-color)."""
+    return "ring-color" if key == "index-color" else key
+
+
+def _safe_compile_regex(pattern: str, flags: int = 0) -> re.Pattern | None:
+    """Safely compile a regex pattern with basic ReDoS protection."""
+    if len(pattern) > 500:
+        _log_warning(f"Rejecting overly long regex pattern ({len(pattern)} chars)")
+        return None
+    try:
+        return re.compile(pattern, flags)
+    except re.error as e:
+        _log_warning(f"Invalid regex pattern '{pattern}': {e}")
+        return None
+
 
 # Configuration for icons and ring symbols
 #
@@ -51,7 +82,6 @@ from kitty.utils import color_as_int
 #   "*.staging.example.com": "󱓞"
 UNIFIED_ICON_CONFIG_DEFAULT = os.path.expanduser("~/.config/nerd-icons/nerd-icons.yml")
 ICON_CONFIG_DEFAULT = os.path.expanduser("~/.config/nerd-icons/config.yml")
-SHARED_ICON_CONFIG_DEFAULT = os.path.expanduser("~/.config/nerd-icons/config.yml")
 # Support both names for host config for backward-compat
 HOST_ICON_CONFIG_CANDIDATES = [
     os.path.expanduser("~/.config/nerd-icons/hosts.yml"),
@@ -107,8 +137,6 @@ def _resolve_icon_config_path() -> str | None:
         return os.path.expanduser(env_path)
     if os.path.isfile(UNIFIED_ICON_CONFIG_DEFAULT):
         return UNIFIED_ICON_CONFIG_DEFAULT
-    if os.path.isfile(SHARED_ICON_CONFIG_DEFAULT):
-        return SHARED_ICON_CONFIG_DEFAULT
     if os.path.isfile(ICON_CONFIG_DEFAULT):
         return ICON_CONFIG_DEFAULT
     return None
@@ -125,8 +153,17 @@ def _load_icon_map() -> None:
       nvim: "..."
       zsh: "..."
     """
-    global _icon_map_cache, _title_pattern_cache, _fallback_icon, _use_process_name, _show_name
-    global _ring_color_active_name, _ring_color_inactive_name, _icon_color_name, _alert_color_name
+    global \
+        _icon_map_cache, \
+        _title_pattern_cache, \
+        _fallback_icon, \
+        _use_process_name, \
+        _show_name
+    global \
+        _ring_color_active_name, \
+        _ring_color_inactive_name, \
+        _icon_color_name, \
+        _alert_color_name
     # Reset caches on reload
     _icon_map_cache = {}
     _title_pattern_cache = {}
@@ -192,7 +229,7 @@ def _load_icon_map() -> None:
         nonlocal lines
         in_block = False
         indent_level_local = None
-        for raw in lines:
+        for idx, raw in enumerate(lines):
             if not in_block:
                 if raw.strip().startswith(block_label):
                     in_block = True
@@ -203,7 +240,6 @@ def _load_icon_map() -> None:
             if indent_level_local is None:
                 indent_level_local = current_indent
             if current_indent < indent_level_local:
-                # end of this block; do not break outer scan so we can find other blocks in another pass
                 break
             if ":" not in raw:
                 continue
@@ -215,36 +251,36 @@ def _load_icon_map() -> None:
                 if not app_key:
                     continue
                 # Inline scalar icon value
-                if rest and not rest.startswith('#') and not rest.startswith('|') and not rest.startswith('>') and not rest.startswith('{') and not rest.startswith('['):
-                    val = rest
-                    if " #" in val:
-                        val = val.split(" #", 1)[0].strip()
-                    if val and (val[0] in ('"', "'") and val[-1] == val[0]):
-                        val = val[1:-1]
+                if (
+                    rest
+                    and not rest.startswith("#")
+                    and not rest.startswith("|")
+                    and not rest.startswith(">")
+                    and not rest.startswith("{")
+                    and not rest.startswith("[")
+                ):
+                    val = _strip_yaml_value(rest)
                     if val:
                         _icon_map_cache[app_key] = val
                     continue
-            except Exception:
+            except Exception as e:
+                _log_warning(f"Error parsing {block_label} at line {idx + 1}: {e}")
                 continue
-            # Otherwise nested mapping; walk subsequent lines for fields (icon, title, colors)
+            # Otherwise nested mapping; walk subsequent lines for fields
             base_indent = current_indent
-            try:
-                idx = lines.index(raw)
-            except ValueError:
-                continue
             j = idx + 1
             nested_icon = None
             colors: Dict[str, str] = {}
             title_patterns: Dict[str, str] = {}
             while j < len(lines):
                 lj = lines[j]
-                if not lj.strip() or lj.lstrip().startswith('#'):
+                if not lj.strip() or lj.lstrip().startswith("#"):
                     j += 1
                     continue
                 indent_j = len(lj) - len(lj.lstrip())
                 if indent_j <= base_indent:
                     break
-                if ':' in lj:
+                if ":" in lj:
                     try:
                         kp, vp = lj.strip().split(":", 1)
                         sk = kp.strip().strip('"').strip("'").lower()
@@ -253,29 +289,32 @@ def _load_icon_map() -> None:
                             sv = sv.split(" #", 1)[0].strip()
                         if sv and (sv[0] in ('"', "'") and sv[-1] == sv[0]):
                             sv = sv[1:-1]
-                        if sk == 'icon':
+                        if sk == "icon":
                             nested_icon = sv
-                        elif sk == 'title':
+                        elif sk == "title":
                             # Handle title: sub-block with pattern mappings
                             # e.g. title: ".*github.*": "icon"
                             title_base_indent = indent_j
                             k = j + 1
                             while k < len(lines):
                                 lk = lines[k]
-                                if not lk.strip() or lk.lstrip().startswith('#'):
+                                if not lk.strip() or lk.lstrip().startswith("#"):
                                     k += 1
                                     continue
                                 indent_k = len(lk) - len(lk.lstrip())
                                 if indent_k <= title_base_indent:
                                     break
-                                if ':' in lk:
+                                if ":" in lk:
                                     try:
                                         tkp, tvp = lk.strip().split(":", 1)
                                         pattern = tkp.strip().strip('"').strip("'")
                                         tval = tvp.strip()
                                         if " #" in tval:
                                             tval = tval.split(" #", 1)[0].strip()
-                                        if tval and (tval[0] in ('"', "'") and tval[-1] == tval[0]):
+                                        if tval and (
+                                            tval[0] in ('"', "'")
+                                            and tval[-1] == tval[0]
+                                        ):
                                             tval = tval[1:-1]
                                         if pattern and tval:
                                             title_patterns[pattern] = tval
@@ -283,9 +322,14 @@ def _load_icon_map() -> None:
                                         pass
                                 k += 1
                             j = k - 1  # Skip the title block we just parsed
-                        elif sk in ('ring-color', 'index-color', 'icon-color', 'alert-color'):
-                            if sk == 'index-color':
-                                colors['ring-color'] = sv
+                        elif sk in (
+                            "ring-color",
+                            "index-color",
+                            "icon-color",
+                            "alert-color",
+                        ):
+                            if sk == "index-color":
+                                colors["ring-color"] = sv
                             else:
                                 colors[sk] = sv
                     except Exception:
@@ -300,7 +344,9 @@ def _load_icon_map() -> None:
                 compiled_patterns = []
                 for pattern, icon in title_patterns.items():
                     try:
-                        compiled_patterns.append((re.compile(pattern, re.IGNORECASE), icon))
+                        compiled_patterns.append(
+                            (re.compile(pattern, re.IGNORECASE), icon)
+                        )
                     except Exception:
                         continue
                 if compiled_patterns:
@@ -317,7 +363,7 @@ def _load_icon_map() -> None:
     # app-colors block (optional, backward-compatible)
     in_app_colors = False
     indent_level = None
-    for raw in lines:
+    for idx, raw in enumerate(lines):
         if not in_app_colors:
             if raw.strip().startswith("app-colors:"):
                 in_app_colors = True
@@ -338,22 +384,17 @@ def _load_icon_map() -> None:
         except Exception:
             continue
         base_indent = current_indent
-        # walk subsequent lines
-        try:
-            idx = lines.index(raw)
-        except ValueError:
-            continue
         j = idx + 1
         colors: Dict[str, str] = {}
         while j < len(lines):
             lj = lines[j]
-            if not lj.strip() or lj.lstrip().startswith('#'):
+            if not lj.strip() or lj.lstrip().startswith("#"):
                 j += 1
                 continue
             indent_j = len(lj) - len(lj.lstrip())
             if indent_j <= base_indent:
                 break
-            if ':' in lj:
+            if ":" in lj:
                 try:
                     kp, vp = lj.strip().split(":", 1)
                     sk = kp.strip().strip('"').strip("'").lower()
@@ -362,11 +403,9 @@ def _load_icon_map() -> None:
                         sv = sv.split(" #", 1)[0].strip()
                     if sv and (sv[0] in ('"', "'") and sv[-1] == sv[0]):
                         sv = sv[1:-1]
-                    if sk == 'icon':
-                        icon_val = sv
-                    elif sk in ('ring-color', 'index-color', 'icon-color', 'alert-color'):
-                        if sk == 'index-color':
-                            colors['ring-color'] = sv
+                    if sk in ("ring-color", "index-color", "icon-color", "alert-color"):
+                        if sk == "index-color":
+                            colors["ring-color"] = sv
                         else:
                             colors[sk] = sv
                 except Exception:
@@ -384,7 +423,9 @@ def _load_icon_map() -> None:
     indent_level = None
     for raw in lines:
         if not in_layout_glyphs:
-            if raw.strip().startswith("layout-glyphs:") or raw.strip().startswith("layout-glyps:"):
+            if raw.strip().startswith("layout-glyphs:") or raw.strip().startswith(
+                "layout-glyps:"
+            ):
                 in_layout_glyphs = True
             continue
         if not raw.strip() or raw.lstrip().startswith("#"):
@@ -394,7 +435,7 @@ def _load_icon_map() -> None:
             indent_level = current_indent
         if current_indent < indent_level:
             break
-        if ':' not in raw:
+        if ":" not in raw:
             continue
         try:
             key_part, val_part = raw.strip().split(":", 1)
@@ -408,6 +449,8 @@ def _load_icon_map() -> None:
                 _layout_glyphs[k] = v
         except Exception:
             continue
+
+
 def _load_host_icon_map() -> None:
     """Load host icon mappings from HOST_ICON_CONFIG_PATH.
 
@@ -442,7 +485,7 @@ def _load_host_icon_map() -> None:
     # config
     for raw in lines:
         line = raw.strip()
-        if not line or line.startswith('#'):
+        if not line or line.startswith("#"):
             continue
         if "prefer-host-icon:" in line:
             try:
@@ -455,12 +498,12 @@ def _load_host_icon_map() -> None:
     # hosts block
     in_hosts = False
     indent_level = None
-    for raw in lines:
+    for idx, raw in enumerate(lines):
         if not in_hosts:
             if raw.strip().startswith("hosts:"):
                 in_hosts = True
             continue
-        if not raw.strip() or raw.lstrip().startswith('#'):
+        if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         # support spaces or tabs
         current_indent = len(raw) - len(raw.lstrip())
@@ -475,7 +518,7 @@ def _load_host_icon_map() -> None:
         #      ring-color: "..."
         #      icon-color: "..."
         #      alert-color: "..."
-        if ':' not in raw:
+        if ":" not in raw:
             continue
         stripped = raw.strip()
         try:
@@ -484,13 +527,20 @@ def _load_host_icon_map() -> None:
             rest = val_part.strip()
             key_lc = key.lower()
             # Inline scalar icon
-            if rest and not rest.startswith('#') and not rest.startswith('|') and not rest.startswith('>') and not rest.startswith('{') and not rest.startswith('['):
+            if (
+                rest
+                and not rest.startswith("#")
+                and not rest.startswith("|")
+                and not rest.startswith(">")
+                and not rest.startswith("{")
+                and not rest.startswith("[")
+            ):
                 val = rest
                 if " #" in val:
                     val = val.split(" #", 1)[0].strip()
                 if val and (val[0] in ('"', "'") and val[-1] == val[0]):
                     val = val[1:-1]
-                if any(ch in key_lc for ch in ['*', '?', '[']):
+                if any(ch in key_lc for ch in ["*", "?", "["]):
                     _host_icon_patterns.append((key_lc, val))
                 else:
                     _host_icon_exact[key_lc] = val
@@ -503,23 +553,17 @@ def _load_host_icon_map() -> None:
             # We need the original list iterator with index
         except Exception:
             continue
-        # Use a while to walk subsequent lines
-        # Find current index in lines
-        try:
-            idx = lines.index(raw)
-        except ValueError:
-            continue
         j = idx + 1
         while j < len(lines):
             line_j = lines[j]
-            if not line_j.strip() or line_j.lstrip().startswith('#'):
+            if not line_j.strip() or line_j.lstrip().startswith("#"):
                 j += 1
                 continue
             indent_j = len(line_j) - len(line_j.lstrip())
             if indent_j <= base_indent:
                 break
             # parse k: v
-            if ':' in line_j:
+            if ":" in line_j:
                 try:
                     kp, vp = line_j.strip().split(":", 1)
                     sk = kp.strip().strip('"').strip("'").lower()
@@ -528,11 +572,16 @@ def _load_host_icon_map() -> None:
                         sv = sv.split(" #", 1)[0].strip()
                     if sv and (sv[0] in ('"', "'") and sv[-1] == sv[0]):
                         sv = sv[1:-1]
-                    if sk == 'icon':
+                    if sk == "icon":
                         icon_val = sv
-                    elif sk in ('ring-color', 'index-color', 'icon-color', 'alert-color'):
-                        if sk == 'index-color':
-                            colors['ring-color'] = sv
+                    elif sk in (
+                        "ring-color",
+                        "index-color",
+                        "icon-color",
+                        "alert-color",
+                    ):
+                        if sk == "index-color":
+                            colors["ring-color"] = sv
                         else:
                             colors[sk] = sv
                 except Exception:
@@ -540,12 +589,12 @@ def _load_host_icon_map() -> None:
             j += 1
         # assign collected
         if icon_val:
-            if any(ch in key_lc for ch in ['*', '?', '[']):
+            if any(ch in key_lc for ch in ["*", "?", "["]):
                 _host_icon_patterns.append((key_lc, icon_val))
             else:
                 _host_icon_exact[key_lc] = icon_val
         if colors:
-            if any(ch in key_lc for ch in ['*', '?', '[']):
+            if any(ch in key_lc for ch in ["*", "?", "["]):
                 _host_color_patterns.append((key_lc, colors))
             else:
                 _host_color_exact[key_lc] = colors
@@ -557,7 +606,7 @@ def _detect_ssh_host(window) -> str | None:
         argv = window.child.foreground_cmdline
     except Exception:
         return None
-    
+
     if not argv:
         return None
     prog = os.path.basename(argv[0])
@@ -568,17 +617,17 @@ def _detect_ssh_host(window) -> str | None:
         if not s:
             return None
         # strip user@
-        if '@' in s:
-            s = s.split('@', 1)[1]
+        if "@" in s:
+            s = s.split("@", 1)[1]
         # strip brackets and :port
-        if s.startswith('[') and ']' in s:
-            s = s[1:s.index(']')]
-        if ':' in s and s.count(':') == 1:
+        if s.startswith("[") and "]" in s:
+            s = s[1 : s.index("]")]
+        if ":" in s and s.count(":") == 1:
             # likely host:port, keep host part
-            s = s.split(':', 1)[0]
+            s = s.split(":", 1)[0]
         # basic validations: ipv4, ipv6, domain/hostname
         ipv4 = re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", s)
-        ipv6 = ':' in s and re.match(r"^[0-9A-Fa-f:]+$", s)
+        ipv6 = ":" in s and re.match(r"^[0-9A-Fa-f:]+$", s)
         domain = re.match(r"^[A-Za-z0-9_.-]+$", s)
         if ipv4 or ipv6 or domain:
             return s
@@ -588,13 +637,32 @@ def _detect_ssh_host(window) -> str | None:
         i = 0
         # options that consume next arg
         consumes_next = {
-            '-b','-c','-D','-E','-F','-I','-J','-L','-l','-m','-O','-o','-p','-Q','-R','-S','-W','-w','-i','-B'
+            "-b",
+            "-c",
+            "-D",
+            "-E",
+            "-F",
+            "-I",
+            "-J",
+            "-L",
+            "-l",
+            "-m",
+            "-O",
+            "-o",
+            "-p",
+            "-Q",
+            "-R",
+            "-S",
+            "-W",
+            "-w",
+            "-i",
+            "-B",
         }
         while i < len(_args):
             tok = _args[i]
-            if tok == '--':
+            if tok == "--":
                 return None
-            if tok.startswith('-'):
+            if tok.startswith("-"):
                 if tok in consumes_next and i + 1 < len(_args):
                     i += 2
                     continue
@@ -604,21 +672,21 @@ def _detect_ssh_host(window) -> str | None:
         return None
 
     host = None
-    if prog in ('ssh', 'slogin'):
+    if prog in ("ssh", "slogin"):
         host = take_first_non_option(args)
-    elif prog in ('mosh', 'mosh-client'):
+    elif prog in ("mosh", "mosh-client"):
         host = take_first_non_option(args)
     # Do not attempt generic fallback scanning to avoid false positives when not using SSH-like tools
     if not host:
         return None
     # strip user@, brackets, and :port
-    if '@' in host:
-        host = host.split('@', 1)[1]
+    if "@" in host:
+        host = host.split("@", 1)[1]
     host = host.strip()
-    if host.startswith('[') and ']' in host:
-        host = host[1:host.index(']')]
-    if ':' in host:
-        host = host.split(':', 1)[0]
+    if host.startswith("[") and "]" in host:
+        host = host[1 : host.index("]")]
+    if ":" in host:
+        host = host.split(":", 1)[0]
     return host or None
 
 
@@ -626,18 +694,18 @@ def _get_host_info(window) -> tuple[str | None, Dict[str, str] | None]:
     """Get both host icon and colors in one pass to avoid duplicate host detection."""
     if not _host_icon_exact and not _host_icon_patterns:
         _load_host_icon_map()
-    
+
     host = _detect_ssh_host(window)
     if not host:
         return None, None
     host_lc = host.lower()
-    
+
     # exact match first
     icon = _host_icon_exact.get(host_lc)
     colors = _host_color_exact.get(host_lc)
     if icon or colors:
         return icon, colors
-    
+
     # wildcard patterns in declared order
     for pattern, icn in _host_icon_patterns:
         try:
@@ -651,7 +719,7 @@ def _get_host_info(window) -> tuple[str | None, Dict[str, str] | None]:
                 return icn, col
         except Exception:
             continue
-    
+
     return None, None
 
 
@@ -795,8 +863,8 @@ def _draw_prefix(screen: Screen, tab: TabBarData, index: int) -> None:
 
     if _has_bell_or_activity(tab):
         alert_name = (
-            (host_colors.get('alert-color') if host_colors else None)
-            or (app_colors.get('alert-color') if app_colors else None)
+            (host_colors.get("alert-color") if host_colors else None)
+            or (app_colors.get("alert-color") if app_colors else None)
             or _alert_color_name
         )
         ring_color = _resolve_color(alert_name, "color1", prev_fg)
@@ -804,15 +872,15 @@ def _draw_prefix(screen: Screen, tab: TabBarData, index: int) -> None:
         is_active = index == get_active_tab_index()
         ring_name = (
             # Focused tab color takes precedence over SSH/app overrides
-            ((_ring_color_active_name if is_active else None))
-            or (host_colors.get('ring-color') if host_colors else None)
-            or (app_colors.get('ring-color') if app_colors else None)
+            (_ring_color_active_name if is_active else None)
+            or (host_colors.get("ring-color") if host_colors else None)
+            or (app_colors.get("ring-color") if app_colors else None)
             or (_ring_color_active_name if is_active else _ring_color_inactive_name)
         )
         ring_color = _resolve_color(ring_name, "foreground", prev_fg)
     icon_name = (
-        (host_colors.get('icon-color') if host_colors else None)
-        or (app_colors.get('icon-color') if app_colors else None)
+        (host_colors.get("icon-color") if host_colors else None)
+        or (app_colors.get("icon-color") if app_colors else None)
         or _icon_color_name
     )
     icon_color = _resolve_color(icon_name, "foreground", prev_fg)
@@ -827,8 +895,10 @@ def _draw_prefix(screen: Screen, tab: TabBarData, index: int) -> None:
     screen.draw(" ")
     screen.cursor.fg = prev_fg
 
+
 def get_active_tab_index() -> int:
     return get_boss().active_tab_manager.active_tab_idx + 1
+
 
 def draw_tab(
     draw_data: DrawData,
@@ -841,18 +911,28 @@ def draw_tab(
     extra_data: ExtraData,
 ) -> int:
     # Get colors directly from kitty options to respect config
-    is_active_tab = (index == get_active_tab_index())
-    
+    is_active_tab = index == get_active_tab_index()
+
     if is_active_tab:
         # Use _resolve_color to properly get colors from config
         # This handles both option names and direct hex values
-        active_bg = _resolve_color("active_tab_background", "background", as_rgb(color_as_int(Color(1, 1, 11))))
-        active_fg = _resolve_color("active_tab_foreground", "foreground", screen.cursor.fg)
+        active_bg = _resolve_color(
+            "active_tab_background", "background", as_rgb(color_as_int(Color(1, 1, 11)))
+        )
+        active_fg = _resolve_color(
+            "active_tab_foreground", "foreground", screen.cursor.fg
+        )
     else:
         # Use config colors for inactive tab
-        active_bg = _resolve_color("inactive_tab_background", "background", as_rgb(color_as_int(Color(24, 24, 37))))
-        active_fg = _resolve_color("inactive_tab_foreground", "foreground", screen.cursor.fg)
-    
+        active_bg = _resolve_color(
+            "inactive_tab_background",
+            "background",
+            as_rgb(color_as_int(Color(24, 24, 37))),
+        )
+        active_fg = _resolve_color(
+            "inactive_tab_foreground", "foreground", screen.cursor.fg
+        )
+
     default_bg = as_rgb(int(draw_data.default_bg))
 
     if extra_data.next_tab:
@@ -865,12 +945,12 @@ def draw_tab(
         prev_tab_bg = default_bg
 
     if is_active_tab:
-        screen.cursor.fg=active_bg
-        screen.cursor.bg=prev_tab_bg
-        screen.draw('')
-        screen.cursor.fg=active_fg
-        screen.cursor.bg=active_bg
-        screen.draw(' ')
+        screen.cursor.fg = active_bg
+        screen.cursor.bg = prev_tab_bg
+        screen.draw("")
+        screen.cursor.fg = active_fg
+        screen.cursor.bg = active_bg
+        screen.draw(" ")
         _draw_prefix(screen, tab, index)
         if _show_name:
             draw_title(draw_data, screen, tab, index, max_tab_length)
@@ -878,23 +958,23 @@ def draw_tab(
         extra = screen.cursor.x + 1 - before - max_tab_length
         if extra > 0 and extra + 1 < screen.cursor.x:
             screen.cursor.x -= extra
-            screen.draw('…')
+            screen.draw("…")
         # ----------
-        screen.draw(' ')
-        screen.cursor.fg=active_bg
-        screen.cursor.bg=next_tab_bg
-        screen.draw('')
+        screen.draw(" ")
+        screen.cursor.fg = active_bg
+        screen.cursor.bg = next_tab_bg
+        screen.draw("")
     elif index < get_active_tab_index():
         if index == 1:
-            screen.cursor.fg=active_bg
-            screen.cursor.bg=default_bg
-            screen.draw('')
-            screen.cursor.fg=active_fg
-            screen.cursor.bg=active_bg
+            screen.cursor.fg = active_bg
+            screen.cursor.bg = default_bg
+            screen.draw("")
+            screen.cursor.fg = active_fg
+            screen.cursor.bg = active_bg
         else:
-            screen.cursor.fg=default_bg
-            screen.draw('')
-        screen.draw(' ')
+            screen.cursor.fg = default_bg
+            screen.draw("")
+        screen.draw(" ")
         _draw_prefix(screen, tab, index)
         if _show_name:
             draw_title(draw_data, screen, tab, index, max_tab_length)
@@ -903,11 +983,11 @@ def draw_tab(
         # print(screen.cursor.x,before,max_tab_length,"->",extra)
         if extra > 0 and extra + 1 < screen.cursor.x:
             screen.cursor.x -= extra
-            screen.draw('…')
+            screen.draw("…")
         # ----------
-        screen.draw(' ')
+        screen.draw(" ")
     elif index > get_active_tab_index():
-        screen.draw(' ')
+        screen.draw(" ")
         _draw_prefix(screen, tab, index)
         if _show_name:
             draw_title(draw_data, screen, tab, index, max_tab_length)
@@ -915,16 +995,16 @@ def draw_tab(
         extra = screen.cursor.x + 2 - before - max_tab_length
         if extra > 0 and extra + 1 < screen.cursor.x:
             screen.cursor.x -= extra
-            screen.draw('…')
+            screen.draw("…")
         # ----------
-        screen.draw(' ')
+        screen.draw(" ")
         if is_last:
-            screen.cursor.fg=active_bg
-            screen.cursor.bg=default_bg
-            screen.draw('')
+            screen.cursor.fg = active_bg
+            screen.cursor.bg = default_bg
+            screen.draw("")
         else:
-            screen.cursor.fg=default_bg
-            screen.draw('')
+            screen.cursor.fg = default_bg
+            screen.draw("")
 
     end = screen.cursor.x
     # if end < screen.columns:

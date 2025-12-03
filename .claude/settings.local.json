@@ -5,7 +5,8 @@
       "Bash(ruff check:*)",
       "Bash(ruff format:*)",
       "Bash(xxd:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(pylint:*)"
     ],
     "deny": [],
     "ask": []

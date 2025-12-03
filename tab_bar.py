@@ -63,6 +63,16 @@ def _normalize_color_key(key: str) -> str:
     return "ring-color" if key == "index-color" else key
 
 
+def _is_inline_yaml_value(rest: str) -> bool:
+    """Check if YAML value is inline (not a block indicator or comment)."""
+    return bool(rest) and not rest.startswith(("#", "|", ">", "{", "["))
+
+
+def _is_wildcard_pattern(s: str) -> bool:
+    """Check if string contains glob wildcard characters."""
+    return any(ch in s for ch in ("*", "?", "["))
+
+
 def _resolve_color_with_precedence(
     color_key: str,
     host_colors: dict[str, str] | None,
@@ -227,7 +237,7 @@ def _iter_yaml_block(
             rest = val_part.strip()
 
             # Determine if this is an inline value or nested block
-            if rest and not rest.startswith(("#", "|", ">", "{", "[")):
+            if _is_inline_yaml_value(rest):
                 inline_val = _strip_yaml_value(rest)
                 yield (idx, key, inline_val, current_indent)
             else:
@@ -347,14 +357,7 @@ def _load_icon_map() -> None:
                 if not app_key:
                     continue
                 # Inline scalar icon value
-                if (
-                    rest
-                    and not rest.startswith("#")
-                    and not rest.startswith("|")
-                    and not rest.startswith(">")
-                    and not rest.startswith("{")
-                    and not rest.startswith("[")
-                ):
+                if _is_inline_yaml_value(rest):
                     val = _strip_yaml_value(rest)
                     if val:
                         _cache.icon_map[app_key] = val
@@ -580,16 +583,9 @@ def _load_host_icon_map() -> None:
             rest = val_part.strip()
             key_lc = key.lower()
             # Inline scalar icon
-            if (
-                rest
-                and not rest.startswith("#")
-                and not rest.startswith("|")
-                and not rest.startswith(">")
-                and not rest.startswith("{")
-                and not rest.startswith("[")
-            ):
+            if _is_inline_yaml_value(rest):
                 val = _strip_yaml_value(rest)
-                if any(ch in key_lc for ch in ["*", "?", "["]):
+                if _is_wildcard_pattern(key_lc):
                     _cache.host_icon_patterns.append((key_lc, val))
                 else:
                     _cache.host_icon_exact[key_lc] = val
@@ -634,12 +630,12 @@ def _load_host_icon_map() -> None:
             j += 1
         # assign collected
         if icon_val:
-            if any(ch in key_lc for ch in ["*", "?", "["]):
+            if _is_wildcard_pattern(key_lc):
                 _cache.host_icon_patterns.append((key_lc, icon_val))
             else:
                 _cache.host_icon_exact[key_lc] = icon_val
         if colors:
-            if any(ch in key_lc for ch in ["*", "?", "["]):
+            if _is_wildcard_pattern(key_lc):
                 _cache.host_color_patterns.append((key_lc, colors))
             else:
                 _cache.host_color_exact[key_lc] = colors
@@ -658,27 +654,6 @@ def _detect_ssh_host(window) -> str | None:
         return None
     prog = os.path.basename(argv[0])
     args = list(argv[1:])
-
-    def extract_host_token(tok: str) -> str | None:
-        s = tok.strip()
-        if not s:
-            return None
-        # strip user@
-        if "@" in s:
-            s = s.split("@", 1)[1]
-        # strip brackets and :port
-        if s.startswith("[") and "]" in s:
-            s = s[1 : s.index("]")]
-        if ":" in s and s.count(":") == 1:
-            # likely host:port, keep host part
-            s = s.split(":", 1)[0]
-        # basic validations: ipv4, ipv6, domain/hostname
-        ipv4 = re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", s)
-        ipv6 = ":" in s and re.match(r"^[0-9A-Fa-f:]+$", s)
-        domain = re.match(r"^[A-Za-z0-9_.-]+$", s)
-        if ipv4 or ipv6 or domain:
-            return s
-        return None
 
     def take_first_non_option(_args: list[str]) -> str | None:
         i = 0
@@ -860,9 +835,6 @@ def _has_bell_or_activity(tab: TabBarData) -> bool:
     return False
 
 
-## Removed dedicated _has_bell helper; using _has_bell_or_activity exclusively
-
-
 def _resolve_color(name: str, default_attr: str, default_fg: int) -> int:
     # Hex value
     try:
@@ -887,7 +859,7 @@ def _resolve_color(name: str, default_attr: str, default_fg: int) -> int:
         return default_fg
 
 
-def _draw_prefix(screen: Screen, tab: TabBarData, index: int) -> None:
+def _draw_prefix(screen: Screen, tab: TabBarData, index: int, active_idx: int) -> None:
     ring = RING_SYMBOLS[(index - 1) % len(RING_SYMBOLS)]
     app_icon, app_key = _get_icon_for_tab(index)
     prev_fg = screen.cursor.fg
@@ -914,7 +886,7 @@ def _draw_prefix(screen: Screen, tab: TabBarData, index: int) -> None:
         )
         ring_color = _resolve_color(alert_name, "color1", prev_fg)
     else:
-        is_active = index == get_active_tab_index()
+        is_active = index == active_idx
         ring_name = (
             # Focused tab color takes precedence over SSH/app overrides
             (_config.ring_color_active if is_active else None)
@@ -953,8 +925,8 @@ def draw_tab(
     is_last: bool,
     extra_data: ExtraData,
 ) -> int:
-    # Get colors directly from kitty options to respect config
-    is_active_tab = index == get_active_tab_index()
+    active_idx = get_active_tab_index()
+    is_active_tab = index == active_idx
 
     if is_active_tab:
         # Use _resolve_color to properly get colors from config
@@ -994,7 +966,7 @@ def draw_tab(
         screen.cursor.fg = active_fg
         screen.cursor.bg = active_bg
         screen.draw(" ")
-        _draw_prefix(screen, tab, index)
+        _draw_prefix(screen, tab, index, active_idx)
         if _config.show_name:
             draw_title(draw_data, screen, tab, index, max_tab_length)
         # ----------
@@ -1007,7 +979,7 @@ def draw_tab(
         screen.cursor.fg = active_bg
         screen.cursor.bg = next_tab_bg
         screen.draw("")
-    elif index < get_active_tab_index():
+    elif index < active_idx:
         if index == 1:
             screen.cursor.fg = active_bg
             screen.cursor.bg = default_bg
@@ -1018,7 +990,7 @@ def draw_tab(
             screen.cursor.fg = default_bg
             screen.draw("")
         screen.draw(" ")
-        _draw_prefix(screen, tab, index)
+        _draw_prefix(screen, tab, index, active_idx)
         if _config.show_name:
             draw_title(draw_data, screen, tab, index, max_tab_length)
         # ----------
@@ -1029,9 +1001,9 @@ def draw_tab(
             screen.draw("…")
         # ----------
         screen.draw(" ")
-    elif index > get_active_tab_index():
+    elif index > active_idx:
         screen.draw(" ")
-        _draw_prefix(screen, tab, index)
+        _draw_prefix(screen, tab, index, active_idx)
         if _config.show_name:
             draw_title(draw_data, screen, tab, index, max_tab_length)
         # ----------
@@ -1053,6 +1025,3 @@ def draw_tab(
     # if end < screen.columns:
     #     screen.draw(' ')
     return end
-
-
-## pulse helper removed

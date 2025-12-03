@@ -62,6 +62,20 @@ def _normalize_color_key(key: str) -> str:
     return "ring-color" if key == "index-color" else key
 
 
+def _resolve_color_with_precedence(
+    color_key: str,
+    host_colors: dict[str, str] | None,
+    app_colors: dict[str, str] | None,
+    default: str,
+) -> str:
+    """Resolve color name with precedence: host > app > default."""
+    return (
+        (host_colors.get(color_key) if host_colors else None)
+        or (app_colors.get(color_key) if app_colors else None)
+        or default
+    )
+
+
 def _safe_compile_regex(pattern: str, flags: int = 0) -> re.Pattern | None:
     """Safely compile a regex pattern with basic ReDoS protection."""
     if len(pattern) > 500:
@@ -329,7 +343,9 @@ def _load_icon_map() -> None:
                                 if ":" in lk:
                                     try:
                                         tkp, tvp = lk.strip().split(":", 1)
-                                        pattern = _normalize_yaml_key(tkp, lowercase=False)
+                                        pattern = _normalize_yaml_key(
+                                            tkp, lowercase=False
+                                        )
                                         tval = _strip_yaml_value(tvp)
                                         if pattern and tval:
                                             title_patterns[pattern] = tval
@@ -355,15 +371,12 @@ def _load_icon_map() -> None:
             # Store title patterns under a special key for later lookup
             if title_patterns:
                 _icon_map_cache[f"{app_key}:title"] = title_patterns
-                # Pre-compile regex patterns for performance
+                # Pre-compile regex patterns for performance (use safe compilation)
                 compiled_patterns = []
                 for pattern, icon in title_patterns.items():
-                    try:
-                        compiled_patterns.append(
-                            (re.compile(pattern, re.IGNORECASE), icon)
-                        )
-                    except Exception:
-                        continue
+                    compiled = _safe_compile_regex(pattern, re.IGNORECASE)
+                    if compiled is not None:
+                        compiled_patterns.append((compiled, icon))
                 if compiled_patterns:
                     _title_pattern_cache[app_key] = compiled_patterns
             if colors:
@@ -862,10 +875,8 @@ def _draw_prefix(screen: Screen, tab: TabBarData, index: int) -> None:
     # safety override removed; use explicit alert-color via config instead
 
     if _has_bell_or_activity(tab):
-        alert_name = (
-            (host_colors.get("alert-color") if host_colors else None)
-            or (app_colors.get("alert-color") if app_colors else None)
-            or _alert_color_name
+        alert_name = _resolve_color_with_precedence(
+            "alert-color", host_colors, app_colors, _alert_color_name
         )
         ring_color = _resolve_color(alert_name, "color1", prev_fg)
     else:
@@ -873,15 +884,13 @@ def _draw_prefix(screen: Screen, tab: TabBarData, index: int) -> None:
         ring_name = (
             # Focused tab color takes precedence over SSH/app overrides
             (_ring_color_active_name if is_active else None)
-            or (host_colors.get("ring-color") if host_colors else None)
-            or (app_colors.get("ring-color") if app_colors else None)
-            or (_ring_color_active_name if is_active else _ring_color_inactive_name)
+            or _resolve_color_with_precedence(
+                "ring-color", host_colors, app_colors, _ring_color_inactive_name
+            )
         )
         ring_color = _resolve_color(ring_name, "foreground", prev_fg)
-    icon_name = (
-        (host_colors.get("icon-color") if host_colors else None)
-        or (app_colors.get("icon-color") if app_colors else None)
-        or _icon_color_name
+    icon_name = _resolve_color_with_precedence(
+        "icon-color", host_colors, app_colors, _icon_color_name
     )
     icon_color = _resolve_color(icon_name, "foreground", prev_fg)
 

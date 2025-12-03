@@ -20,6 +20,25 @@ def _log_warning(msg: str) -> None:
     print(f"[tab_bar.py] Warning: {msg}", file=sys.stderr)
 
 
+MAX_CONFIG_SIZE_BYTES = 1024 * 1024  # 1MB
+
+
+def _read_config_file(path: str) -> list[str] | None:
+    """Safely read a config file with size validation."""
+    try:
+        size = os.path.getsize(path)
+        if size > MAX_CONFIG_SIZE_BYTES:
+            _log_warning(
+                f"Config file too large ({size} bytes), limit is {MAX_CONFIG_SIZE_BYTES}"
+            )
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return f.readlines()
+    except OSError as e:
+        _log_warning(f"Failed to read config: {e}")
+        return None
+
+
 def _strip_yaml_value(val: str) -> str:
     """Strip inline comments and surrounding quotes from a YAML value."""
     val = val.strip()
@@ -28,6 +47,14 @@ def _strip_yaml_value(val: str) -> str:
     if val and len(val) >= 2 and val[0] in ('"', "'") and val[-1] == val[0]:
         val = val[1:-1]
     return val
+
+
+def _normalize_yaml_key(raw: str, lowercase: bool = True) -> str:
+    """Normalize a YAML key by stripping whitespace and quotes."""
+    key = raw.strip()
+    if len(key) >= 2 and key[0] in ('"', "'") and key[-1] == key[0]:
+        key = key[1:-1]
+    return key.lower() if lowercase else key
 
 
 def _normalize_color_key(key: str) -> str:
@@ -109,6 +136,10 @@ _app_color_map: Dict[str, Dict[str, str]] = {}
 _layout_hints_enabled: bool = False
 _layout_glyphs: Dict[str, str] = {}
 
+# Lazy load flags to prevent redundant file reads
+_icon_config_loaded: bool = False
+_host_config_loaded: bool = False
+
 # Activity pulse removed
 # Host icons cache (preserve order for wildcard patterns)
 _host_icon_exact: Dict[str, str] = {}
@@ -118,7 +149,7 @@ _host_color_patterns: list[tuple[str, Dict[str, str]]] = []
 
 
 def _parse_bool(val: str) -> bool:
-    v = val.strip().strip('"').strip("'").lower()
+    v = _normalize_yaml_key(val)
     if v in ("true", "yes", "1", "on"):
         return True
     if v in ("false", "no", "0", "off"):
@@ -158,7 +189,8 @@ def _load_icon_map() -> None:
         _title_pattern_cache, \
         _fallback_icon, \
         _use_process_name, \
-        _show_name
+        _show_name, \
+        _icon_config_loaded
     global \
         _ring_color_active_name, \
         _ring_color_inactive_name, \
@@ -170,10 +202,8 @@ def _load_icon_map() -> None:
     cfg_path = _resolve_icon_config_path()
     if not cfg_path:
         return
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception:
+    lines = _read_config_file(cfg_path)
+    if lines is None:
         return
 
     # Parse top-level config: block only (avoid leaking per-app colors into globals)
@@ -196,12 +226,8 @@ def _load_icon_map() -> None:
             continue
         try:
             key, val = raw.strip().split(":", 1)
-            key = key.strip().strip('"').strip("'").lower()
-            part = val.strip()
-            if " #" in part:
-                part = part.split(" #", 1)[0].strip()
-            if part and (part[0] in ('"', "'") and part[-1] == part[0]):
-                part = part[1:-1]
+            key = _normalize_yaml_key(key)
+            part = _strip_yaml_value(val)
             if key == "fallback-icon" and part:
                 _fallback_icon = part
             elif key == "use-process-name":
@@ -246,7 +272,7 @@ def _load_icon_map() -> None:
             stripped = raw.strip()
             try:
                 key_part, val_part = stripped.split(":", 1)
-                app_key = key_part.strip().strip('"').strip("'").lower()
+                app_key = _normalize_yaml_key(key_part)
                 rest = val_part.strip()
                 if not app_key:
                     continue
@@ -283,12 +309,8 @@ def _load_icon_map() -> None:
                 if ":" in lj:
                     try:
                         kp, vp = lj.strip().split(":", 1)
-                        sk = kp.strip().strip('"').strip("'").lower()
-                        sv = vp.strip()
-                        if " #" in sv:
-                            sv = sv.split(" #", 1)[0].strip()
-                        if sv and (sv[0] in ('"', "'") and sv[-1] == sv[0]):
-                            sv = sv[1:-1]
+                        sk = _normalize_yaml_key(kp)
+                        sv = _strip_yaml_value(vp)
                         if sk == "icon":
                             nested_icon = sv
                         elif sk == "title":
@@ -307,15 +329,8 @@ def _load_icon_map() -> None:
                                 if ":" in lk:
                                     try:
                                         tkp, tvp = lk.strip().split(":", 1)
-                                        pattern = tkp.strip().strip('"').strip("'")
-                                        tval = tvp.strip()
-                                        if " #" in tval:
-                                            tval = tval.split(" #", 1)[0].strip()
-                                        if tval and (
-                                            tval[0] in ('"', "'")
-                                            and tval[-1] == tval[0]
-                                        ):
-                                            tval = tval[1:-1]
+                                        pattern = _normalize_yaml_key(tkp, lowercase=False)
+                                        tval = _strip_yaml_value(tvp)
                                         if pattern and tval:
                                             title_patterns[pattern] = tval
                                     except Exception:
@@ -380,7 +395,7 @@ def _load_icon_map() -> None:
         # parse app key and nested mapping
         try:
             key_part, _ = raw.strip().split(":", 1)
-            app_key = key_part.strip().strip('"').strip("'").lower()
+            app_key = _normalize_yaml_key(key_part)
         except Exception:
             continue
         base_indent = current_indent
@@ -397,12 +412,8 @@ def _load_icon_map() -> None:
             if ":" in lj:
                 try:
                     kp, vp = lj.strip().split(":", 1)
-                    sk = kp.strip().strip('"').strip("'").lower()
-                    sv = vp.strip()
-                    if " #" in sv:
-                        sv = sv.split(" #", 1)[0].strip()
-                    if sv and (sv[0] in ('"', "'") and sv[-1] == sv[0]):
-                        sv = sv[1:-1]
+                    sk = _normalize_yaml_key(kp)
+                    sv = _strip_yaml_value(vp)
                     if sk in ("ring-color", "index-color", "icon-color", "alert-color"):
                         if sk == "index-color":
                             colors["ring-color"] = sv
@@ -439,16 +450,14 @@ def _load_icon_map() -> None:
             continue
         try:
             key_part, val_part = raw.strip().split(":", 1)
-            k = key_part.strip().strip('"').strip("'").lower()
-            v = val_part.strip()
-            if " #" in v:
-                v = v.split(" #", 1)[0].strip()
-            if v and (v[0] in ('"', "'") and v[-1] == v[0]):
-                v = v[1:-1]
+            k = _normalize_yaml_key(key_part)
+            v = _strip_yaml_value(val_part)
             if k and v:
                 _layout_glyphs[k] = v
         except Exception:
             continue
+
+    _icon_config_loaded = True
 
 
 def _load_host_icon_map() -> None:
@@ -463,17 +472,14 @@ def _load_host_icon_map() -> None:
       "*.prod.example.com": "icon"
     """
     global _host_icon_exact, _host_icon_patterns, _prefer_host_icon
-    global _host_color_exact, _host_color_patterns
+    global _host_color_exact, _host_color_patterns, _host_config_loaded
     lines = None
     # Always prefer the separate host-icons.yml for security
-    try:
-        for p in HOST_ICON_CONFIG_CANDIDATES:
-            if os.path.isfile(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
+    for p in HOST_ICON_CONFIG_CANDIDATES:
+        if os.path.isfile(p):
+            lines = _read_config_file(p)
+            if lines is not None:
                 break
-    except Exception:
-        lines = None
     if not lines:
         return
     # reset host caches before (re)loading (don't reset icon cache - that's handled by _load_icon_map)
@@ -523,7 +529,7 @@ def _load_host_icon_map() -> None:
         stripped = raw.strip()
         try:
             key_part, val_part = stripped.split(":", 1)
-            key = key_part.strip().strip('"').strip("'")
+            key = _normalize_yaml_key(key_part, lowercase=False)
             rest = val_part.strip()
             key_lc = key.lower()
             # Inline scalar icon
@@ -535,11 +541,7 @@ def _load_host_icon_map() -> None:
                 and not rest.startswith("{")
                 and not rest.startswith("[")
             ):
-                val = rest
-                if " #" in val:
-                    val = val.split(" #", 1)[0].strip()
-                if val and (val[0] in ('"', "'") and val[-1] == val[0]):
-                    val = val[1:-1]
+                val = _strip_yaml_value(rest)
                 if any(ch in key_lc for ch in ["*", "?", "["]):
                     _host_icon_patterns.append((key_lc, val))
                 else:
@@ -566,12 +568,8 @@ def _load_host_icon_map() -> None:
             if ":" in line_j:
                 try:
                     kp, vp = line_j.strip().split(":", 1)
-                    sk = kp.strip().strip('"').strip("'").lower()
-                    sv = vp.strip()
-                    if " #" in sv:
-                        sv = sv.split(" #", 1)[0].strip()
-                    if sv and (sv[0] in ('"', "'") and sv[-1] == sv[0]):
-                        sv = sv[1:-1]
+                    sk = _normalize_yaml_key(kp)
+                    sv = _strip_yaml_value(vp)
                     if sk == "icon":
                         icon_val = sv
                     elif sk in (
@@ -598,6 +596,8 @@ def _load_host_icon_map() -> None:
                 _host_color_patterns.append((key_lc, colors))
             else:
                 _host_color_exact[key_lc] = colors
+
+    _host_config_loaded = True
 
 
 def _detect_ssh_host(window) -> str | None:
@@ -692,7 +692,7 @@ def _detect_ssh_host(window) -> str | None:
 
 def _get_host_info(window) -> tuple[str | None, Dict[str, str] | None]:
     """Get both host icon and colors in one pass to avoid duplicate host detection."""
-    if not _host_icon_exact and not _host_icon_patterns:
+    if not _host_config_loaded:
         _load_host_icon_map()
 
     host = _detect_ssh_host(window)
@@ -734,7 +734,7 @@ def _get_host_colors(window) -> Dict[str, str] | None:
 
 
 def _get_icon_for_tab(index: int) -> tuple[str, str | None]:
-    if not _icon_map_cache:
+    if not _icon_config_loaded:
         _load_icon_map()
     icon = _fallback_icon
     matched_app: str | None = None

@@ -2,8 +2,8 @@ import os
 import re
 import sys
 import fnmatch
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Dict, Iterator
 from kitty.fast_data_types import Screen, get_boss, get_options
 from kitty.rgb import Color
 from kitty.tab_bar import (
@@ -139,7 +139,32 @@ HOST_ICON_CONFIG_CANDIDATES = [
     os.path.expanduser("~/.config/nerd-icons/hosts.yml"),
     os.path.expanduser("~/.config/nerd-icons/host-icons.yml"),
 ]
-RING_SYMBOLS = "󰬺 󰬻 󰬼 󰬽 󰬾 󰬿 󰭀 󰭁 󰭂 󰿩".split()
+RING_SYMBOLS = ("󰬺", "󰬻", "󰬼", "󰬽", "󰬾", "󰬿", "󰭀", "󰭁", "󰭂", "󰿩")
+
+_SSH_OPTIONS_WITH_ARG = frozenset(
+    (
+        "-b",
+        "-c",
+        "-D",
+        "-E",
+        "-F",
+        "-I",
+        "-J",
+        "-L",
+        "-l",
+        "-m",
+        "-O",
+        "-o",
+        "-p",
+        "-Q",
+        "-R",
+        "-S",
+        "-W",
+        "-w",
+        "-i",
+        "-B",
+    )
+)
 
 
 @dataclass
@@ -369,8 +394,8 @@ def _load_icon_map() -> None:
             base_indent = current_indent
             j = idx + 1
             nested_icon = None
-            colors: Dict[str, str] = {}
-            title_patterns: Dict[str, str] = {}
+            colors: dict[str, str] = {}
+            title_patterns: dict[str, str] = {}
             while j < len(lines):
                 lj = lines[j]
                 if not lj.strip() or lj.lstrip().startswith("#"):
@@ -418,10 +443,7 @@ def _load_icon_map() -> None:
                             "icon-color",
                             "alert-color",
                         ):
-                            if sk == "index-color":
-                                colors["ring-color"] = sv
-                            else:
-                                colors[sk] = sv
+                            colors[_normalize_color_key(sk)] = sv
                     except Exception:
                         pass
                 j += 1
@@ -472,7 +494,7 @@ def _load_icon_map() -> None:
             continue
         base_indent = current_indent
         j = idx + 1
-        colors: Dict[str, str] = {}
+        colors: dict[str, str] = {}
         while j < len(lines):
             lj = lines[j]
             if not lj.strip() or lj.lstrip().startswith("#"):
@@ -487,10 +509,7 @@ def _load_icon_map() -> None:
                     sk = _normalize_yaml_key(kp)
                     sv = _strip_yaml_value(vp)
                     if sk in ("ring-color", "index-color", "icon-color", "alert-color"):
-                        if sk == "index-color":
-                            colors["ring-color"] = sv
-                        else:
-                            colors[sk] = sv
+                        colors[_normalize_color_key(sk)] = sv
                 except Exception:
                     pass
             j += 1
@@ -592,7 +611,7 @@ def _load_host_icon_map() -> None:
                 continue
             # Otherwise, it's a mapping block; read subsequent indented lines
             base_indent = current_indent
-            colors: Dict[str, str] = {}
+            colors: dict[str, str] = {}
             icon_val: str | None = None
             # Peek following lines while indent > base_indent
             # We need the original list iterator with index
@@ -621,10 +640,7 @@ def _load_host_icon_map() -> None:
                         "icon-color",
                         "alert-color",
                     ):
-                        if sk == "index-color":
-                            colors["ring-color"] = sv
-                        else:
-                            colors[sk] = sv
+                        colors[_normalize_color_key(sk)] = sv
                 except Exception:
                     pass
             j += 1
@@ -657,35 +673,12 @@ def _detect_ssh_host(window) -> str | None:
 
     def take_first_non_option(_args: list[str]) -> str | None:
         i = 0
-        # options that consume next arg
-        consumes_next = {
-            "-b",
-            "-c",
-            "-D",
-            "-E",
-            "-F",
-            "-I",
-            "-J",
-            "-L",
-            "-l",
-            "-m",
-            "-O",
-            "-o",
-            "-p",
-            "-Q",
-            "-R",
-            "-S",
-            "-W",
-            "-w",
-            "-i",
-            "-B",
-        }
         while i < len(_args):
             tok = _args[i]
             if tok == "--":
                 return None
             if tok.startswith("-"):
-                if tok in consumes_next and i + 1 < len(_args):
+                if tok in _SSH_OPTIONS_WITH_ARG and i + 1 < len(_args):
                     i += 2
                     continue
                 i += 1
@@ -712,7 +705,7 @@ def _detect_ssh_host(window) -> str | None:
     return host or None
 
 
-def _get_host_info(window) -> tuple[str | None, Dict[str, str] | None]:
+def _get_host_info(window) -> tuple[str | None, dict[str, str] | None]:
     """Get both host icon and colors in one pass to avoid duplicate host detection."""
     if not _cache.host_config_loaded:
         _load_host_icon_map()
@@ -745,16 +738,6 @@ def _get_host_info(window) -> tuple[str | None, Dict[str, str] | None]:
     return None, None
 
 
-def _get_host_icon(window) -> str | None:
-    icon, _ = _get_host_info(window)
-    return icon
-
-
-def _get_host_colors(window) -> Dict[str, str] | None:
-    _, colors = _get_host_info(window)
-    return colors
-
-
 def _get_icon_for_tab(index: int) -> tuple[str, str | None]:
     if not _cache.icon_config_loaded:
         _load_icon_map()
@@ -769,7 +752,7 @@ def _get_icon_for_tab(index: int) -> tuple[str, str | None]:
         window = py_tab.active_window
         # Prefer host icon when configured
         if _config.prefer_host_icon and window is not None:
-            host_icon = _get_host_icon(window)
+            host_icon, _ = _get_host_info(window)
             if host_icon:
                 return host_icon, None
         candidates = []
@@ -877,8 +860,6 @@ def _draw_prefix(screen: Screen, tab: TabBarData, index: int, active_idx: int) -
         host_colors = None
 
     app_colors = _config.app_color_map.get(app_key) if app_key else None
-
-    # safety override removed; use explicit alert-color via config instead
 
     if _has_bell_or_activity(tab):
         alert_name = _resolve_color_with_precedence(
@@ -995,7 +976,6 @@ def draw_tab(
             draw_title(draw_data, screen, tab, index, max_tab_length)
         # ----------
         extra = screen.cursor.x + 1 - before - max_tab_length
-        # print(screen.cursor.x,before,max_tab_length,"->",extra)
         if extra > 0 and extra + 1 < screen.cursor.x:
             screen.cursor.x -= extra
             screen.draw("…")
@@ -1022,6 +1002,4 @@ def draw_tab(
             screen.draw("")
 
     end = screen.cursor.x
-    # if end < screen.columns:
-    #     screen.draw(' ')
     return end

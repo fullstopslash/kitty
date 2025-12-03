@@ -206,6 +206,7 @@ _cache = IconCache()
 
 
 def _parse_bool(val: str) -> bool:
+    """Parse a YAML boolean value, returning False for unrecognized values."""
     v = _normalize_yaml_key(val)
     if v in ("true", "yes", "1", "on"):
         return True
@@ -256,19 +257,16 @@ def _iter_yaml_block(
         if ":" not in raw:
             continue
 
-        try:
-            key_part, val_part = stripped.split(":", 1)
-            key = _normalize_yaml_key(key_part)
-            rest = val_part.strip()
+        key_part, val_part = stripped.split(":", 1)
+        key = _normalize_yaml_key(key_part)
+        rest = val_part.strip()
 
-            # Determine if this is an inline value or nested block
-            if _is_inline_yaml_value(rest):
-                inline_val = _strip_yaml_value(rest)
-                yield (idx, key, inline_val, current_indent)
-            else:
-                yield (idx, key, None, current_indent)
-        except Exception:
-            continue
+        # Determine if this is an inline value or nested block
+        if _is_inline_yaml_value(rest):
+            inline_val = _strip_yaml_value(rest)
+            yield (idx, key, inline_val, current_indent)
+        else:
+            yield (idx, key, None, current_indent)
 
 
 def _resolve_icon_config_path() -> str | None:
@@ -287,31 +285,8 @@ def _resolve_icon_config_path() -> str | None:
     return None
 
 
-def _load_icon_map() -> None:
-    """Load a minimal icon map from the YAML file without external deps.
-
-    Expected structure (subset):
-    ---
-    config:
-      fallback-icon: "..."
-    icons:
-      nvim: "..."
-      zsh: "..."
-    """
-    global _config, _cache
-    # Reset caches on reload
-    _cache.icon_map = {}
-    _cache.title_patterns = {}
-    _config.app_color_map = {}
-    _config.layout_glyphs = {}
-    cfg_path = _resolve_icon_config_path()
-    if not cfg_path:
-        return
-    lines = _read_config_file(cfg_path)
-    if lines is None:
-        return
-
-    # Parse top-level config: block only (avoid leaking per-app colors into globals)
+def _parse_global_config(lines: list[str]) -> None:
+    """Parse the top-level config: block from YAML lines."""
     in_config = False
     config_indent = None
     for raw in lines:
@@ -329,147 +304,141 @@ def _load_icon_map() -> None:
             break
         if ":" not in raw:
             continue
-        try:
-            key, val = raw.strip().split(":", 1)
-            key = _normalize_yaml_key(key)
-            part = _strip_yaml_value(val)
-            if key == "fallback-icon" and part:
-                _config.fallback_icon = part
-            elif key == "use-process-name":
-                _config.use_process_name = _parse_bool(part)
-            elif key == "show-name":
-                _config.show_name = _parse_bool(part)
-            elif key == "layout-hints":
-                _config.layout_hints_enabled = _parse_bool(part)
-            elif key in ("ring-color-active", "index-color-active") and part:
-                _config.ring_color_active = part
-            elif key in ("ring-color-inactive", "index-color-inactive") and part:
-                _config.ring_color_inactive = part
-            elif key in ("ring-color", "index-color") and part:
-                _config.ring_color_active = part
-                _config.ring_color_inactive = part
-            elif key == "icon-color" and part:
-                _config.icon_color = part
-            elif key == "alert-color" and part:
-                _config.alert_color = part
-        except Exception:
-            pass
+        key, val = raw.strip().split(":", 1)
+        key = _normalize_yaml_key(key)
+        part = _strip_yaml_value(val)
+        if key == "fallback-icon" and part:
+            _config.fallback_icon = part
+        elif key == "use-process-name":
+            _config.use_process_name = _parse_bool(part)
+        elif key == "show-name":
+            _config.show_name = _parse_bool(part)
+        elif key == "layout-hints":
+            _config.layout_hints_enabled = _parse_bool(part)
+        elif key in ("ring-color-active", "index-color-active") and part:
+            _config.ring_color_active = part
+        elif key in ("ring-color-inactive", "index-color-inactive") and part:
+            _config.ring_color_inactive = part
+        elif key in ("ring-color", "index-color") and part:
+            _config.ring_color_active = part
+            _config.ring_color_inactive = part
+        elif key == "icon-color" and part:
+            _config.icon_color = part
+        elif key == "alert-color" and part:
+            _config.alert_color = part
 
-    # Helper to parse a specific block label ("icons:" or "apps:")
-    def _parse_app_block(block_label: str) -> None:
-        nonlocal lines
-        in_block = False
-        indent_level_local = None
-        for idx, raw in enumerate(lines):
-            if not in_block:
-                if raw.strip().startswith(block_label):
-                    in_block = True
-                continue
-            if not raw.strip() or raw.lstrip().startswith("#"):
-                continue
-            current_indent = len(raw) - len(raw.lstrip())
-            if indent_level_local is None:
-                indent_level_local = current_indent
-            if current_indent < indent_level_local:
-                break
-            if ":" not in raw:
-                continue
-            stripped = raw.strip()
-            try:
-                key_part, val_part = stripped.split(":", 1)
-                app_key = _normalize_yaml_key(key_part)
-                rest = val_part.strip()
-                if not app_key:
-                    continue
-                # Inline scalar icon value
-                if _is_inline_yaml_value(rest):
-                    val = _strip_yaml_value(rest)
-                    if val:
-                        _cache.icon_map[app_key] = val
-                    continue
-            except Exception as e:
-                _log_warning(f"Error parsing {block_label} at line {idx + 1}: {e}")
-                continue
-            # Otherwise nested mapping; walk subsequent lines for fields
-            base_indent = current_indent
-            j = idx + 1
-            nested_icon = None
-            colors: dict[str, str] = {}
-            title_patterns: dict[str, str] = {}
-            while j < len(lines):
-                lj = lines[j]
-                if not lj.strip() or lj.lstrip().startswith("#"):
-                    j += 1
-                    continue
-                indent_j = len(lj) - len(lj.lstrip())
-                if indent_j <= base_indent:
-                    break
-                if ":" in lj:
-                    try:
-                        kp, vp = lj.strip().split(":", 1)
-                        sk = _normalize_yaml_key(kp)
-                        sv = _strip_yaml_value(vp)
-                        if sk == "icon":
-                            nested_icon = sv
-                        elif sk == "title":
-                            # Handle title: sub-block with pattern mappings
-                            # e.g. title: ".*github.*": "icon"
-                            title_base_indent = indent_j
-                            k = j + 1
-                            while k < len(lines):
-                                lk = lines[k]
-                                if not lk.strip() or lk.lstrip().startswith("#"):
-                                    k += 1
-                                    continue
-                                indent_k = len(lk) - len(lk.lstrip())
-                                if indent_k <= title_base_indent:
-                                    break
-                                if ":" in lk:
-                                    try:
-                                        tkp, tvp = lk.strip().split(":", 1)
-                                        pattern = _normalize_yaml_key(
-                                            tkp, lowercase=False
-                                        )
-                                        tval = _strip_yaml_value(tvp)
-                                        if pattern and tval:
-                                            title_patterns[pattern] = tval
-                                    except Exception:
-                                        pass
-                                k += 1
-                            j = k - 1  # Skip the title block we just parsed
-                        elif sk in (
-                            "ring-color",
-                            "index-color",
-                            "icon-color",
-                            "alert-color",
-                        ):
-                            colors[_normalize_color_key(sk)] = sv
-                    except Exception:
-                        pass
-                j += 1
-            if nested_icon:
-                _cache.icon_map[app_key] = nested_icon
-            # Store title patterns under a special key for later lookup
-            if title_patterns:
-                _cache.icon_map[f"{app_key}:title"] = title_patterns
-                # Pre-compile regex patterns for performance (use safe compilation)
-                compiled_patterns = []
-                for pattern, icon in title_patterns.items():
-                    compiled = _safe_compile_regex(pattern, re.IGNORECASE)
-                    if compiled is not None:
-                        compiled_patterns.append((compiled, icon))
-                if compiled_patterns:
-                    _cache.title_patterns[app_key] = compiled_patterns
-            if colors:
-                _config.app_color_map[app_key] = colors
 
-    # Parse blocks independently if present (in priority order: sessions, icons, apps, title_icons)
-    _parse_app_block("sessions:")
-    _parse_app_block("icons:")
-    _parse_app_block("apps:")
-    _parse_app_block("title_icons:")
+def _parse_title_patterns(
+    lines: list[str], start_idx: int, base_indent: int
+) -> tuple[dict[str, str], int]:
+    """Parse title: sub-block with pattern mappings. Returns (patterns, end_idx)."""
+    title_patterns: dict[str, str] = {}
+    k = start_idx
+    while k < len(lines):
+        lk = lines[k]
+        if not lk.strip() or lk.lstrip().startswith("#"):
+            k += 1
+            continue
+        indent_k = len(lk) - len(lk.lstrip())
+        if indent_k <= base_indent:
+            break
+        if ":" in lk:
+            tkp, tvp = lk.strip().split(":", 1)
+            pattern = _normalize_yaml_key(tkp, lowercase=False)
+            tval = _strip_yaml_value(tvp)
+            if pattern and tval:
+                title_patterns[pattern] = tval
+        k += 1
+    return title_patterns, k
 
-    # app-colors block (optional, backward-compatible)
+
+def _parse_app_nested_block(
+    lines: list[str], start_idx: int, base_indent: int
+) -> tuple[str | None, dict[str, str], dict[str, str]]:
+    """Parse nested app mapping (icon, colors, title patterns). Returns (icon, colors, title_patterns)."""
+    nested_icon = None
+    colors: dict[str, str] = {}
+    title_patterns: dict[str, str] = {}
+    j = start_idx
+    while j < len(lines):
+        lj = lines[j]
+        if not lj.strip() or lj.lstrip().startswith("#"):
+            j += 1
+            continue
+        indent_j = len(lj) - len(lj.lstrip())
+        if indent_j <= base_indent:
+            break
+        if ":" in lj:
+            kp, vp = lj.strip().split(":", 1)
+            sk = _normalize_yaml_key(kp)
+            sv = _strip_yaml_value(vp)
+            if sk == "icon":
+                nested_icon = sv
+            elif sk == "title":
+                title_patterns, k = _parse_title_patterns(lines, j + 1, indent_j)
+                j = k - 1  # Will be incremented below
+            elif sk in ("ring-color", "index-color", "icon-color", "alert-color"):
+                colors[_normalize_color_key(sk)] = sv
+        j += 1
+    return nested_icon, colors, title_patterns
+
+
+def _store_title_patterns(app_key: str, title_patterns: dict[str, str]) -> None:
+    """Store and pre-compile title patterns for an app."""
+    _cache.icon_map[f"{app_key}:title"] = title_patterns
+    compiled_patterns = []
+    for pattern, icon in title_patterns.items():
+        compiled = _safe_compile_regex(pattern, re.IGNORECASE)
+        if compiled is not None:
+            compiled_patterns.append((compiled, icon))
+    if compiled_patterns:
+        _cache.title_patterns[app_key] = compiled_patterns
+
+
+def _parse_app_block(lines: list[str], block_label: str) -> None:
+    """Parse an app/icon block (icons:, apps:, sessions:, title_icons:)."""
+    in_block = False
+    indent_level_local = None
+    for idx, raw in enumerate(lines):
+        if not in_block:
+            if raw.strip().startswith(block_label):
+                in_block = True
+            continue
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        current_indent = len(raw) - len(raw.lstrip())
+        if indent_level_local is None:
+            indent_level_local = current_indent
+        if current_indent < indent_level_local:
+            break
+        if ":" not in raw:
+            continue
+        stripped = raw.strip()
+        key_part, val_part = stripped.split(":", 1)
+        app_key = _normalize_yaml_key(key_part)
+        rest = val_part.strip()
+        if not app_key:
+            continue
+        # Inline scalar icon value
+        if _is_inline_yaml_value(rest):
+            val = _strip_yaml_value(rest)
+            if val:
+                _cache.icon_map[app_key] = val
+            continue
+        # Otherwise nested mapping
+        nested_icon, colors, title_patterns = _parse_app_nested_block(
+            lines, idx + 1, current_indent
+        )
+        if nested_icon:
+            _cache.icon_map[app_key] = nested_icon
+        if title_patterns:
+            _store_title_patterns(app_key, title_patterns)
+        if colors:
+            _config.app_color_map[app_key] = colors
+
+
+def _parse_app_colors_block(lines: list[str]) -> None:
+    """Parse app-colors: block (backward-compatible color overrides)."""
     in_app_colors = False
     indent_level = None
     for idx, raw in enumerate(lines):
@@ -487,11 +456,8 @@ def _load_icon_map() -> None:
         if ":" not in raw:
             continue
         # parse app key and nested mapping
-        try:
-            key_part, _ = raw.strip().split(":", 1)
-            app_key = _normalize_yaml_key(key_part)
-        except Exception:
-            continue
+        key_part, _ = raw.strip().split(":", 1)
+        app_key = _normalize_yaml_key(key_part)
         base_indent = current_indent
         j = idx + 1
         colors: dict[str, str] = {}
@@ -504,14 +470,11 @@ def _load_icon_map() -> None:
             if indent_j <= base_indent:
                 break
             if ":" in lj:
-                try:
-                    kp, vp = lj.strip().split(":", 1)
-                    sk = _normalize_yaml_key(kp)
-                    sv = _strip_yaml_value(vp)
-                    if sk in ("ring-color", "index-color", "icon-color", "alert-color"):
-                        colors[_normalize_color_key(sk)] = sv
-                except Exception:
-                    pass
+                kp, vp = lj.strip().split(":", 1)
+                sk = _normalize_yaml_key(kp)
+                sv = _strip_yaml_value(vp)
+                if sk in ("ring-color", "index-color", "icon-color", "alert-color"):
+                    colors[_normalize_color_key(sk)] = sv
             j += 1
         if colors:
             # Merge with existing if present, otherwise set
@@ -520,7 +483,31 @@ def _load_icon_map() -> None:
             else:
                 _config.app_color_map[app_key] = colors
 
-    # layout-glyphs block (optional) - using generic iterator
+
+def _load_icon_map() -> None:
+    """Load a minimal icon map from the YAML file without external deps."""
+    # Reset caches on reload
+    _cache.icon_map = {}
+    _cache.title_patterns = {}
+    _config.app_color_map = {}
+    _config.layout_glyphs = {}
+    cfg_path = _resolve_icon_config_path()
+    if not cfg_path:
+        return
+    lines = _read_config_file(cfg_path)
+    if lines is None:
+        return
+
+    _parse_global_config(lines)
+
+    # Parse app/icon blocks (priority order)
+    for block_label in ("sessions:", "icons:", "apps:", "title_icons:"):
+        _parse_app_block(lines, block_label)
+
+    # Backward-compatible app-colors block
+    _parse_app_colors_block(lines)
+
+    # Layout glyphs block
     for _idx, k, v, _indent in _iter_yaml_block(
         lines, ("layout-glyphs:", "layout-glyps:")
     ):
@@ -530,18 +517,52 @@ def _load_icon_map() -> None:
     _cache.icon_config_loaded = True
 
 
-def _load_host_icon_map() -> None:
-    """Load host icon mappings from HOST_ICON_CONFIG_PATH.
+def _parse_host_nested_block(
+    lines: list[str], start_idx: int, base_indent: int
+) -> tuple[str | None, dict[str, str]]:
+    """Parse nested host mapping (icon and colors). Returns (icon, colors)."""
+    icon_val: str | None = None
+    colors: dict[str, str] = {}
+    j = start_idx
+    while j < len(lines):
+        line_j = lines[j]
+        if not line_j.strip() or line_j.lstrip().startswith("#"):
+            j += 1
+            continue
+        indent_j = len(line_j) - len(line_j.lstrip())
+        if indent_j <= base_indent:
+            break
+        if ":" in line_j:
+            kp, vp = line_j.strip().split(":", 1)
+            sk = _normalize_yaml_key(kp)
+            sv = _strip_yaml_value(vp)
+            if sk == "icon":
+                icon_val = sv
+            elif sk in ("ring-color", "index-color", "icon-color", "alert-color"):
+                colors[_normalize_color_key(sk)] = sv
+        j += 1
+    return icon_val, colors
 
-    Structure:
-    ---
-    config:
-      prefer-host-icon: true
-    hosts:
-      myhost: "icon"
-      "*.prod.example.com": "icon"
-    """
-    global _config, _cache
+
+def _store_host_entry(
+    key_lc: str, icon: str | None, colors: dict[str, str] | None
+) -> None:
+    """Store host icon and colors in appropriate cache (exact or pattern)."""
+    is_pattern = _is_wildcard_pattern(key_lc)
+    if icon:
+        if is_pattern:
+            _cache.host_icon_patterns.append((key_lc, icon))
+        else:
+            _cache.host_icon_exact[key_lc] = icon
+    if colors:
+        if is_pattern:
+            _cache.host_color_patterns.append((key_lc, colors))
+        else:
+            _cache.host_color_exact[key_lc] = colors
+
+
+def _load_host_icon_map() -> None:
+    """Load host icon mappings from HOST_ICON_CONFIG_PATH."""
     lines = None
     # Always prefer the separate host-icons.yml for security
     for p in HOST_ICON_CONFIG_CANDIDATES:
@@ -551,26 +572,23 @@ def _load_host_icon_map() -> None:
                 break
     if not lines:
         return
-    # reset host caches before (re)loading (don't reset icon cache - that's handled by _load_icon_map)
+    # Reset host caches before (re)loading
     _cache.host_icon_exact = {}
     _cache.host_icon_patterns = []
     _cache.host_color_exact = {}
     _cache.host_color_patterns = []
 
-    # config
+    # Parse config section for prefer-host-icon
     for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if "prefer-host-icon:" in line:
-            try:
-                part = line.split(":", 1)[1].strip()
-                part = part.split(" #", 1)[0].strip()
-                _config.prefer_host_icon = _parse_bool(part)
-            except Exception:
-                pass
+            part = line.split(":", 1)[1].strip()
+            part = part.split(" #", 1)[0].strip()
+            _config.prefer_host_icon = _parse_bool(part)
 
-    # hosts block
+    # Parse hosts: block
     in_hosts = False
     indent_level = None
     for idx, raw in enumerate(lines):
@@ -580,81 +598,28 @@ def _load_host_icon_map() -> None:
             continue
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
-        # support spaces or tabs
         current_indent = len(raw) - len(raw.lstrip())
         if indent_level is None:
             indent_level = current_indent
         if current_indent < indent_level:
             break
-        # Support two formats under hosts:
-        # 1) key: "icon"
-        # 2) key:
-        #      icon: "..."
-        #      ring-color: "..."
-        #      icon-color: "..."
-        #      alert-color: "..."
         if ":" not in raw:
             continue
         stripped = raw.strip()
-        try:
-            key_part, val_part = stripped.split(":", 1)
-            key = _normalize_yaml_key(key_part, lowercase=False)
-            rest = val_part.strip()
-            key_lc = key.lower()
-            # Inline scalar icon
-            if _is_inline_yaml_value(rest):
-                val = _strip_yaml_value(rest)
-                if _is_wildcard_pattern(key_lc):
-                    _cache.host_icon_patterns.append((key_lc, val))
-                else:
-                    _cache.host_icon_exact[key_lc] = val
-                continue
-            # Otherwise, it's a mapping block; read subsequent indented lines
-            base_indent = current_indent
-            colors: dict[str, str] = {}
-            icon_val: str | None = None
-            # Peek following lines while indent > base_indent
-            # We need the original list iterator with index
-        except Exception:
+        key_part, val_part = stripped.split(":", 1)
+        key = _normalize_yaml_key(key_part, lowercase=False)
+        rest = val_part.strip()
+        key_lc = key.lower()
+
+        # Inline scalar icon
+        if _is_inline_yaml_value(rest):
+            val = _strip_yaml_value(rest)
+            _store_host_entry(key_lc, val, None)
             continue
-        j = idx + 1
-        while j < len(lines):
-            line_j = lines[j]
-            if not line_j.strip() or line_j.lstrip().startswith("#"):
-                j += 1
-                continue
-            indent_j = len(line_j) - len(line_j.lstrip())
-            if indent_j <= base_indent:
-                break
-            # parse k: v
-            if ":" in line_j:
-                try:
-                    kp, vp = line_j.strip().split(":", 1)
-                    sk = _normalize_yaml_key(kp)
-                    sv = _strip_yaml_value(vp)
-                    if sk == "icon":
-                        icon_val = sv
-                    elif sk in (
-                        "ring-color",
-                        "index-color",
-                        "icon-color",
-                        "alert-color",
-                    ):
-                        colors[_normalize_color_key(sk)] = sv
-                except Exception:
-                    pass
-            j += 1
-        # assign collected
-        if icon_val:
-            if _is_wildcard_pattern(key_lc):
-                _cache.host_icon_patterns.append((key_lc, icon_val))
-            else:
-                _cache.host_icon_exact[key_lc] = icon_val
-        if colors:
-            if _is_wildcard_pattern(key_lc):
-                _cache.host_color_patterns.append((key_lc, colors))
-            else:
-                _cache.host_color_exact[key_lc] = colors
+
+        # Nested mapping block
+        icon_val, colors = _parse_host_nested_block(lines, idx + 1, current_indent)
+        _store_host_entry(key_lc, icon_val, colors if colors else None)
 
     _cache.host_config_loaded = True
 
@@ -738,16 +703,59 @@ def _get_host_info(window) -> tuple[str | None, dict[str, str] | None]:
     return None, None
 
 
+def _get_window_candidates(window) -> tuple[str, list[str]]:
+    """Extract window title and candidate strings for icon matching."""
+    candidates: list[str] = []
+    window_title = ""
+    try:
+        title = window.title or ""
+        window_title = title
+        if title:
+            candidates.append(title)
+            for tok in re.split(r"[^A-Za-z0-9._+-]+", title):
+                if tok:
+                    candidates.append(tok)
+    except Exception:
+        pass
+    if _config.use_process_name:
+        try:
+            cmdline = window.child.foreground_cmdline
+            if cmdline:
+                candidates.append(os.path.basename(cmdline[0]))
+        except Exception:
+            pass
+    return window_title, candidates
+
+
+def _match_title_pattern(window_title: str) -> tuple[str, str] | None:
+    """Match window title against cached regex patterns."""
+    for app_key, compiled_list in _cache.title_patterns.items():
+        for pattern, icon in compiled_list:
+            if pattern.search(window_title):
+                return icon, app_key
+    return None
+
+
+def _find_icon_in_cache(candidates: list[str]) -> tuple[str, str] | None:
+    """Find first matching icon in cache from candidate strings."""
+    for cand in candidates:
+        k = cand.lower()
+        if k in _cache.icon_map:
+            val = _cache.icon_map[k]
+            if not isinstance(val, dict):
+                return val, k
+    return None
+
+
 def _get_icon_for_tab(index: int) -> tuple[str, str | None]:
+    """Get icon and app key for a tab by index."""
     if not _cache.icon_config_loaded:
         _load_icon_map()
     icon = _config.fallback_icon
-    matched_app: str | None = None
     try:
         tm = get_boss().active_tab_manager
         if tm is None:
-            return icon, matched_app
-        # draw_tab receives 1-based index
+            return icon, None
         py_tab = tm.tabs[index - 1]
         window = py_tab.active_window
         # Prefer host icon when configured
@@ -755,55 +763,28 @@ def _get_icon_for_tab(index: int) -> tuple[str, str | None]:
             host_icon, _ = _get_host_info(window)
             if host_icon:
                 return host_icon, None
-        candidates = []
-        window_title = ""
-        if window is not None:
-            # Use window title variants (preferred)
-            try:
-                title = window.title or ""
-                window_title = title
-                if title:
-                    candidates.append(title)
-                    # split title into tokens by non-word separators
-                    for tok in re.split(r"[^A-Za-z0-9._+-]+", title):
-                        if tok:
-                            candidates.append(tok)
-            except Exception:
-                pass
-            # Optionally include foreground process name if enabled
-            if _config.use_process_name:
-                try:
-                    cmdline = window.child.foreground_cmdline
-                    if cmdline:
-                        base = os.path.basename(cmdline[0])
-                        candidates.append(base)
-                except Exception:
-                    pass
-        # Check for title pattern matches first (against full window title)
+        if window is None:
+            return icon, None
+        window_title, candidates = _get_window_candidates(window)
+        # Check title patterns first
         if window_title:
-            # Use pre-compiled patterns from cache for performance
-            for app_key, compiled_list in _cache.title_patterns.items():
-                for pattern, icon in compiled_list:
-                    if pattern.search(window_title):
-                        return icon, app_key
-        # Then check for exact matches in candidates
-        for cand in candidates:
-            k = cand.lower()
-            # Check for exact match
-            if k in _cache.icon_map:
-                val = _cache.icon_map[k]
-                # Skip dict values (title patterns already checked above)
-                if not isinstance(val, dict):
-                    return val, k
+            match = _match_title_pattern(window_title)
+            if match:
+                return match
+        # Then check exact matches
+        match = _find_icon_in_cache(candidates)
+        if match:
+            return match
     except Exception:
         pass
-    return icon, matched_app
+    return icon, None
 
 
 opts = get_options()
 
 
 def _has_bell_or_activity(tab: TabBarData) -> bool:
+    """Check if tab has bell/urgent notification or activity since last focus."""
     try:
         if getattr(tab, "has_activity_since_last_focus", False):
             return True
@@ -819,73 +800,90 @@ def _has_bell_or_activity(tab: TabBarData) -> bool:
 
 
 def _resolve_color(name: str, default_attr: str, default_fg: int) -> int:
+    """Resolve a color name to RGB int (hex, kitty option, or fallback)."""
     # Hex value
-    try:
-        if name.startswith("#"):
-            h = name.lstrip("#")
-            if len(h) in (6, 8):
+    if name.startswith("#"):
+        h = name.lstrip("#")
+        if len(h) in (6, 8):
+            try:
                 r = int(h[0:2], 16)
                 g = int(h[2:4], 16)
                 b = int(h[4:6], 16)
                 return as_rgb(color_as_int(Color(r, g, b)))
-    except Exception:
-        pass
+            except ValueError:
+                pass
     # Kitty option name
     try:
         return as_rgb(color_as_int(getattr(opts, name)))
-    except Exception:
+    except (AttributeError, TypeError):
         pass
     # Fallback to provided default_attr
     try:
         return as_rgb(color_as_int(getattr(opts, default_attr)))
-    except Exception:
+    except (AttributeError, TypeError):
         return default_fg
 
 
-def _draw_prefix(screen: Screen, tab: TabBarData, index: int, active_idx: int) -> None:
-    ring = RING_SYMBOLS[(index - 1) % len(RING_SYMBOLS)]
-    app_icon, app_key = _get_icon_for_tab(index)
-    prev_fg = screen.cursor.fg
-    # Choose ring color (alert > active/inactive)
-    # Host-specific overrides (apply only when host icon would be used)
-    host_colors = None
+def _get_host_colors_for_tab(index: int) -> dict[str, str] | None:
+    """Get host-specific colors for a tab if host icon is active."""
+    if not _config.prefer_host_icon:
+        return None
     try:
         tm = get_boss().active_tab_manager
         window = tm.tabs[index - 1].active_window if tm else None
-        if window is not None and _config.prefer_host_icon:
-            host_icon_for_window, host_colors = _get_host_info(window)
-            if not host_icon_for_window:
-                host_colors = None  # Only use colors if we have a host icon
+        if window is not None:
+            host_icon, host_colors = _get_host_info(window)
+            if host_icon:  # Only use colors if we have a host icon
+                return host_colors
     except Exception:
-        host_colors = None
+        pass
+    return None
 
-    app_colors = _config.app_color_map.get(app_key) if app_key else None
 
+def _get_ring_color(
+    tab: TabBarData,
+    index: int,
+    active_idx: int,
+    host_colors: dict[str, str] | None,
+    app_colors: dict[str, str] | None,
+    default_fg: int,
+) -> int:
+    """Determine ring color based on alert status and active state."""
     if _has_bell_or_activity(tab):
         alert_name = _resolve_color_with_precedence(
             "alert-color", host_colors, app_colors, _config.alert_color
         )
-        ring_color = _resolve_color(alert_name, "color1", prev_fg)
-    else:
-        is_active = index == active_idx
-        ring_name = (
-            # Focused tab color takes precedence over SSH/app overrides
-            (_config.ring_color_active if is_active else None)
-            or _resolve_color_with_precedence(
-                "ring-color", host_colors, app_colors, _config.ring_color_inactive
-            )
-        )
-        ring_color = _resolve_color(ring_name, "foreground", prev_fg)
+        return _resolve_color(alert_name, "color1", default_fg)
+    is_active = index == active_idx
+    ring_name = (
+        _config.ring_color_active if is_active else None
+    ) or _resolve_color_with_precedence(
+        "ring-color", host_colors, app_colors, _config.ring_color_inactive
+    )
+    return _resolve_color(ring_name, "foreground", default_fg)
+
+
+def _draw_prefix(screen: Screen, tab: TabBarData, index: int, active_idx: int) -> None:
+    """Draw the ring symbol and app icon prefix for a tab."""
+    ring = RING_SYMBOLS[(index - 1) % len(RING_SYMBOLS)]
+    app_icon, app_key = _get_icon_for_tab(index)
+    prev_fg = screen.cursor.fg
+
+    host_colors = _get_host_colors_for_tab(index)
+    app_colors = _config.app_color_map.get(app_key) if app_key else None
+
+    ring_color = _get_ring_color(
+        tab, index, active_idx, host_colors, app_colors, prev_fg
+    )
     icon_name = _resolve_color_with_precedence(
         "icon-color", host_colors, app_colors, _config.icon_color
     )
     icon_color = _resolve_color(icon_name, "foreground", prev_fg)
 
-    # Draw ring
+    # Draw ring and icon
     screen.cursor.fg = ring_color
     screen.draw(ring)
     screen.draw("")
-    # Draw icon
     screen.cursor.fg = icon_color
     screen.draw(app_icon)
     screen.draw(" ")
@@ -893,7 +891,36 @@ def _draw_prefix(screen: Screen, tab: TabBarData, index: int, active_idx: int) -
 
 
 def get_active_tab_index() -> int:
+    """Return the 1-based index of the currently active tab."""
     return get_boss().active_tab_manager.active_tab_idx + 1
+
+
+def _truncate_tab_title(
+    screen: Screen, before: int, max_tab_length: int, offset: int
+) -> None:
+    """Truncate tab title with ellipsis if it exceeds max length."""
+    extra = screen.cursor.x + offset - before - max_tab_length
+    if extra > 0 and extra + 1 < screen.cursor.x:
+        screen.cursor.x -= extra
+        screen.draw("…")
+
+
+def _draw_tab_content(
+    draw_data: DrawData,
+    screen: Screen,
+    tab: TabBarData,
+    index: int,
+    active_idx: int,
+    before: int,
+    max_tab_length: int,
+    truncate_offset: int,
+) -> None:
+    """Draw tab prefix, optional title, and handle truncation."""
+    _draw_prefix(screen, tab, index, active_idx)
+    if _config.show_name:
+        draw_title(draw_data, screen, tab, index, max_tab_length)
+    _truncate_tab_title(screen, before, max_tab_length, truncate_offset)
+    screen.draw(" ")
 
 
 def draw_tab(
@@ -906,6 +933,7 @@ def draw_tab(
     is_last: bool,
     extra_data: ExtraData,
 ) -> int:
+    """Kitty tab bar entry point: draw a single tab with icon and powerline style."""
     active_idx = get_active_tab_index()
     is_active_tab = index == active_idx
 

@@ -1,22 +1,6 @@
-# Based on MIT licensed code at https://github.com/chancez/dotfiles/blob/badc69d3895a6a942285amount26b8c372a55d77533eamount/kitty/.config/kitty/relative_resize.py
+# Based on MIT licensed code at https://github.com/chancez/dotfiles/blob/master/kitty/.config/kitty/relative_resize.py
+from encode_key import encode_key_mapping
 from kittens.tui.handler import result_handler
-from kitty.key_encoding import KeyEvent, parse_shortcut
-
-
-def encode_key_mapping(window, key_mapping):
-    mods, key = parse_shortcut(key_mapping)
-    event = KeyEvent(
-        mods=mods,
-        key=key,
-        shift=bool(mods & 1),
-        alt=bool(mods & 2),
-        ctrl=bool(mods & 4),
-        super=bool(mods & 8),
-        hyper=bool(mods & 16),
-        meta=bool(mods & 32),
-    ).as_window_system_event()
-
-    return window.encoded_key(event)
 
 
 def main(args):

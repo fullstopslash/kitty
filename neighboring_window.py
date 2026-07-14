@@ -25,27 +25,11 @@ def encode_key_mapping(window, key_mapping):
 @result_handler(no_ui=True)
 def handle_result(args, result, target_window_id, boss):
     window = boss.window_id_map.get(target_window_id)
-    if window is None:
-        return
 
-    direction = args[1]
     cmd = window.child.foreground_cmdline[0]
-    
-    # Key mapping for directions
-    key_map = {
-        'left': 'ctrl+h',
-        'down': 'ctrl+j',
-        'up': 'ctrl+k',
-        'right': 'ctrl+l'
-    }
-    
-    match cmd:
-        case 'tmux':
-            # Running tmux directly - pass keys through
-            keymap = key_map.get(direction)
-            if keymap:
-                encoded = encode_key_mapping(window, keymap)
-                window.write_to_child(encoded)
-        case _:
-            # Not tmux - navigate kitty windows
-            boss.active_tab.neighboring_window(direction)
+    if cmd == 'tmux':
+        keymap = args[2]
+        encoded = encode_key_mapping(window, keymap)
+        window.write_to_child(encoded)
+    else:
+        boss.active_tab.neighboring_window(args[1])

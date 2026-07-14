@@ -5,11 +5,12 @@ set -euo pipefail
 
 mode="${1:-}"
 
-target_pid=$(hyprctl clients -j 2>/dev/null | jq -r '
+read -r target_addr target_pid < <(hyprctl clients -j 2>/dev/null | jq -r '
     [.[] | select(.class == "kitty")] |
     sort_by(.focusHistoryID) |
-    .[0].pid // empty
-') && [[ -n "$target_pid" ]] || { notify-send "kitty-merge" "No kitty window found" 2>/dev/null; exit 0; }
+    .[0] | "\(.address) \(.pid)"
+')
+[[ -n "$target_addr" && -n "$target_pid" ]] || { notify-send "kitty-merge" "No kitty window found" 2>/dev/null; exit 0; }
 
 SOCK="unix:@mykitty-${target_pid}"
 os_count=$(kitty @ ls --to "$SOCK" 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
@@ -22,7 +23,7 @@ kitty --class picker -e \
     ~/.config/kitty/scripts/kitty-merge-windows.sh \
     --plan "$plan" --sock "$SOCK" $mode
 
-[[ -s "$plan" ]] || { hyprctl dispatch focuswindow "pid:$target_pid" 2>/dev/null; exit 0; }
+[[ -s "$plan" ]] || { hyprctl dispatch "hl.dsp.focus({ window = [[address:${target_addr}]] })" 2>/dev/null; exit 0; }
 
 # Merge while picker still covers kitty — detach-window --stay-in-tab
 # preserves active tab focus, so no flicker when kitty regains visibility.
@@ -33,5 +34,5 @@ while read -r wid; do
         && ((ok++)) || true
 done < "$plan"
 
-hyprctl dispatch focuswindow "pid:$target_pid" 2>/dev/null || true
+hyprctl dispatch "hl.dsp.focus({ window = [[address:${target_addr}]] })" 2>/dev/null || true
 true

@@ -48,7 +48,11 @@ selected=$(echo "$entries" | fzf \
     --header="Merge into: ${t_title:0:60}" \
     --prompt="$prompt" \
     --reverse --no-info --border \
-    --multi) || exit 0
+    --cycle --multi \
+    --color='bg:#1e1e2e,bg+:#313244,fg:#cdd6f4,fg+:#cdd6f4' \
+    --color='hl:#f38ba8,hl+:#f38ba8,info:#cba6f7,marker:#a6e3a1' \
+    --color='prompt:#cba6f7,pointer:#f5e0dc,spinner:#f5e0dc' \
+    --color='header:#89b4fa,border:#45475a,query:#cdd6f4') || exit 0
 
 if [[ "$MODE" == "windows" ]]; then
     while IFS='|' read -r os_id _; do
